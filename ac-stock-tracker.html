@@ -19947,7 +19947,9 @@ function handleHeaderDblClick(event) {
 
   const INTERACTIVE = 'button, input, a, select, textarea, label, [role="button"]';
   let drag = null;
-  let dragBusy = false;
+  let dragFrame = 0;
+  let dragMoveInFlight = false;
+  let dragLatestPoint = null;
 
   function snapPreview(show) {
     let p = document.getElementById('desktop-snap-preview');
@@ -19959,16 +19961,6 @@ function handleHeaderDblClick(event) {
     if (p) p.style.display = show ? 'block' : 'none';
   }
 
-  function endHeaderDrag(e) {
-    if (!drag) return;
-    const snap = drag.snapArmed;
-    drag = null;
-    snapPreview(false);
-    try { header.releasePointerCapture(e.pointerId); } catch (err) {}
-    if (snap) {
-      try { window.pywebview.api.maximize(); } catch (err) {}
-    }
-  }
 
   async function startHeaderDrag(e) {
     const api = window.pywebview.api;
@@ -19976,6 +19968,16 @@ function handleHeaderDblClick(event) {
     try { maximized = await api.is_maximized(); } catch (err) {}
     try {
       const b = await api.get_window_bounds();
+      const screen = window.screen || {};
+      const fillsWorkArea = !maximized
+        && Number.isFinite(screen.availWidth)
+        && Number.isFinite(screen.availHeight)
+        && b.width >= screen.availWidth - 2
+        && b.height >= screen.availHeight - 2;
+      if (fillsWorkArea) {
+        try { header.releasePointerCapture(e.pointerId); } catch (err) {}
+        return;
+      }
       if (maximized) {
         drag = {
           mode: 'restore',
@@ -19997,6 +19999,7 @@ function handleHeaderDblClick(event) {
 
   async function dragHeaderMove(e) {
     const api = window.pywebview.api;
+    if (!drag) return;
     if (drag.mode === 'restore') {
       // First move on a maximized window: restore it and anchor the titlebar
       // grab point proportionally under the cursor (Windows behavior).
@@ -20009,19 +20012,63 @@ function handleHeaderDblClick(event) {
       }
       const w = (b && b.width) || 1100;
       const h = (b && b.height) || 680;
+      if (!drag) return;
       drag.mode = 'move';
       drag.grabX = Math.round(drag.fracX * w);
       drag.w = w; drag.h = h;
     }
+    if (!drag) return;
     try {
-      api.set_bounds(Math.round(e.screenX - drag.grabX), Math.round(e.screenY - drag.grabY), drag.w, drag.h);
+      await api.move_window(Math.round(e.screenX - drag.grabX),
+                            Math.round(e.screenY - drag.grabY));
     } catch (err) {}
+  }
 
+  function updateHeaderSnap(e) {
+    if (!drag) return;
     const topEdge = (window.screen && typeof window.screen.availTop === 'number') ? window.screen.availTop : 0;
     if (e.screenY <= topEdge + 6) {
       if (!drag.snapArmed) { drag.snapArmed = true; snapPreview(true); }
     } else if (drag.snapArmed && e.screenY > topEdge + 60) {
       drag.snapArmed = false; snapPreview(false);
+    }
+  }
+
+  function scheduleHeaderMove() {
+    if (dragFrame || dragMoveInFlight || !dragLatestPoint) return;
+    dragFrame = requestAnimationFrame(function() {
+      dragFrame = 0;
+      if (!drag || dragMoveInFlight || !dragLatestPoint) return;
+      const point = dragLatestPoint;
+      dragLatestPoint = null;
+      dragMoveInFlight = true;
+      Promise.resolve(dragHeaderMove(point)).finally(function() {
+        dragMoveInFlight = false;
+        if (drag && dragLatestPoint) scheduleHeaderMove();
+      });
+    });
+  }
+
+  async function endHeaderDrag(e) {
+    if (!drag) return;
+    const currentDrag = drag;
+    dragLatestPoint = { screenX: e.screenX, screenY: e.screenY };
+    updateHeaderSnap(e);
+    scheduleHeaderMove();
+    // Keep the drag state alive until the final coalesced point has crossed
+    // the bridge, so release cannot leave the window one event behind.
+    while (drag === currentDrag && (dragLatestPoint || dragMoveInFlight || dragFrame)) {
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      if (!dragMoveInFlight && dragLatestPoint) scheduleHeaderMove();
+    }
+    if (drag !== currentDrag) return;
+    const snap = drag.snapArmed;
+    drag = null;
+    dragLatestPoint = null;
+    snapPreview(false);
+    try { header.releasePointerCapture(e.pointerId); } catch (err) {}
+    if (snap) {
+      try { window.pywebview.api.maximize(); } catch (err) {}
     }
   }
 
@@ -20031,21 +20078,39 @@ function handleHeaderDblClick(event) {
     e.stopPropagation();
   });
 
-  header.addEventListener('pointerdown', function(e) {
+  async function beginHeaderPointerDown(e) {
     if (e.button !== 0 || drag || !isDesktopShell()) return;
     if (e.target.closest(INTERACTIVE)) return;
+    e.preventDefault();
+    try { header.releasePointerCapture(e.pointerId); } catch (err) {}
+
+    const api = window.pywebview && window.pywebview.api;
+    try {
+      if (api && typeof api.start_native_drag === 'function'
+          && await api.start_native_drag()) {
+        return;
+      }
+    } catch (err) {}
+
+    // Native drag is optional; retain the existing JS fallback for source
+    // diagnostics, disabled native mode, and older desktop bridge versions.
     try { header.setPointerCapture(e.pointerId); } catch (err) {}
     startHeaderDrag(e);
+  }
+
+  header.addEventListener('pointerdown', function(e) {
+    void beginHeaderPointerDown(e);
   });
 
   header.addEventListener('pointermove', function(e) {
-    if (!drag || dragBusy) return;
-    dragBusy = true;
-    Promise.resolve(dragHeaderMove(e)).finally(function() { dragBusy = false; });
+    if (!drag) return;
+    dragLatestPoint = { screenX: e.screenX, screenY: e.screenY };
+    updateHeaderSnap(e);
+    scheduleHeaderMove();
   });
 
-  header.addEventListener('pointerup', endHeaderDrag);
-  header.addEventListener('pointercancel', endHeaderDrag);
+  header.addEventListener('pointerup', function(e) { void endHeaderDrag(e); });
+  header.addEventListener('pointercancel', function(e) { void endHeaderDrag(e); });
 })();
 
 let _desktopResizeState = null;

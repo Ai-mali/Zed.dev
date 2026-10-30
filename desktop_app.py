@@ -1214,20 +1214,26 @@ class DesktopApi:
 
     def __init__(self):
         self._window = None
+        self._hwnd = None
 
     def set_window(self, window):
         self._window = window
+        self._hwnd = None
 
     def get_hwnd(self):
+        if self._hwnd:
+            return self._hwnd
         if self._window and hasattr(self._window, 'native') and self._window.native:
             try:
-                return int(self._window.native.Handle.ToInt32())
+                self._hwnd = int(self._window.native.Handle.ToInt32())
+                return self._hwnd
             except Exception:
-                pass
+                self._hwnd = None
         try:
             hwnd = ctypes.windll.user32.FindWindowW(None, 'VRE AC Stock')
             if hwnd:
-                return hwnd
+                self._hwnd = int(hwnd)
+                return self._hwnd
         except Exception:
             pass
         return None
@@ -1408,10 +1414,13 @@ class DesktopApi:
             if hwnd:
                 SWP_NOZORDER = 0x0004
                 SWP_NOACTIVATE = 0x0010
-                ctypes.windll.user32.SetWindowPos(
+                ok = ctypes.windll.user32.SetWindowPos(
                     hwnd, 0, int(x), int(y), int(w), int(h),
                     SWP_NOZORDER | SWP_NOACTIVATE
                 )
+                if not ok:
+                    self._hwnd = None
+                    raise ctypes.WinError()
                 if self._window:
                     self._window._x = int(x)
                     self._window._y = int(y)
@@ -1430,6 +1439,106 @@ class DesktopApi:
             except Exception:
                 pass
         return False
+
+    def move_window(self, x, y):
+        """Move the window without resizing it during header dragging."""
+        try:
+            hwnd = self.get_hwnd()
+            if hwnd:
+                SWP_NOSIZE = 0x0001
+                SWP_NOZORDER = 0x0004
+                SWP_NOACTIVATE = 0x0010
+                ok = ctypes.windll.user32.SetWindowPos(
+                    hwnd, 0, int(x), int(y), 0, 0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+                )
+                if not ok:
+                    self._hwnd = None
+                    raise ctypes.WinError()
+                if self._window:
+                    self._window._x = int(x)
+                    self._window._y = int(y)
+                return True
+        except Exception:
+            self._hwnd = None
+
+        if self._window:
+            try:
+                self._window.move(int(x), int(y))
+                return True
+            except Exception:
+                pass
+        return False
+
+    def start_native_drag(self):
+        """Start a native Windows titlebar move without blocking the bridge."""
+        if os.environ.get("VRE_NATIVE_DRAG", "1").strip() == "0":
+            return False
+        try:
+            hwnd = self.get_hwnd()
+            if not hwnd:
+                return False
+
+            point = wintypes.POINT()
+            if not _u32.GetCursorPos(ctypes.byref(point)):
+                return False
+
+            bounds = self.get_window_bounds()
+            maximized = self.is_maximized()
+            work = self._get_work_area(hwnd)
+            if (not maximized and work
+                    and bounds["width"] >= work[2] - 2
+                    and bounds["height"] >= work[3] - 2):
+                return False
+            grab_y = int(point.y) - int(bounds["y"])
+            frac_x = 0.5
+            if bounds["width"]:
+                frac_x = min(1.0, max(0.0,
+                                     (int(point.x) - int(bounds["x"]))
+                                     / float(bounds["width"])))
+
+            if maximized:
+                if not self.restore():
+                    return False
+                restored = self.get_window_bounds()
+                target_x = int(point.x) - round(frac_x * restored["width"])
+                target_y = int(point.y) - grab_y
+                if not self.move_window(target_x, target_y):
+                    return False
+
+            _u32.ReleaseCapture()
+            # WM_NCLBUTTONDOWN / HTCAPTION. PostMessage is intentional: the
+            # WebView bridge must return while Windows owns its modal move loop.
+            lparam = ((int(point.x) & 0xFFFF)
+                      | ((int(point.y) & 0xFFFF) << 16))
+            posted = _u32.PostMessageW(
+                hwnd, 0x00A1, 2, wintypes.LPARAM(lparam))
+            if not posted:
+                return False
+
+            def monitor_native_drag():
+                try:
+                    while _u32.GetAsyncKeyState(0x01) & 0x8000:
+                        time.sleep(0.01)
+                    final_point = wintypes.POINT()
+                    work = self._get_work_area(hwnd)
+                    if (_u32.GetCursorPos(ctypes.byref(final_point))
+                            and work and final_point.y <= work[1] + 6):
+                        self.maximize()
+                    rect = wintypes.RECT()
+                    if _u32.GetWindowRect(hwnd, ctypes.byref(rect)) and self._window:
+                        self._window._x = int(rect.left)
+                        self._window._y = int(rect.top)
+                        self._window._width = int(rect.right - rect.left)
+                        self._window._height = int(rect.bottom - rect.top)
+                except Exception:
+                    pass
+
+            threading.Thread(target=monitor_native_drag,
+                             name="native-window-drag", daemon=True).start()
+            return True
+        except Exception:
+            return False
 
     def minimize(self):
         if self._window:
