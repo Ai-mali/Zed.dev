@@ -28,6 +28,52 @@
 @media (prefers-reduced-motion:reduce) {
   .serial-photo-download, .serial-photo-download-icon { transition:none; }
 }
+.serial-photo-stage-zoomable {
+  overflow:hidden !important;
+}
+#serial-photo-img.serial-photo-img-zoomable {
+  cursor:grab;
+  touch-action:none;
+  user-select:none;
+}
+#serial-photo-img.serial-photo-img-dragging {
+  cursor:grabbing;
+  transition:none !important;
+}
+#serial-photo-img {
+  width:auto;
+  height:auto;
+  image-rendering:auto;
+  transition:none !important;
+}
+#serial-photo-img.serial-photo-img-interacting {
+  will-change:transform;
+}
+.serial-photo-zoom-controls {
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  margin-left:auto;
+  white-space:nowrap;
+}
+.serial-photo-zoom-label {
+  min-width:34px;
+  color:var(--text-sub);
+  font:600 11px/24px ui-monospace, SFMono-Regular, Consolas, monospace;
+  text-align:center;
+}
+.serial-photo-zoom-reset {
+  height:24px;
+  padding:0 8px;
+  border:1px solid var(--border);
+  border-radius:6px;
+  background:var(--surface2);
+  color:var(--text-main);
+  font-size:11px;
+  font-weight:600;
+  cursor:pointer;
+}
+.serial-photo-zoom-reset:hover { border-color:var(--brand-c); }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -10180,7 +10226,7 @@ body:not(.theme-light) .licm-banner-chip { background: rgba(255,255,255,.08); }
     </div>
     <div class="modal-body" style="overflow:auto; flex:1; padding:16px; background:#f4f7f9;">
       <div id="serial-photo-stage" style="min-height:300px; border:1px solid #dbe1e8; border-radius:6px; background:#f4f7f9; display:flex; align-items:center; justify-content:center; padding:10px;">
-        <img id="serial-photo-img" alt="" style="max-width:100%; max-height:70vh; object-fit:contain; border-radius:4px;">
+        <img id="serial-photo-img" alt="" draggable="false" style="max-width:100%; max-height:70vh; object-fit:contain; border-radius:4px;">
         <div id="serial-photo-error" style="display:none; text-align:center; color:var(--text-sub); font-size:12px;">
           Photo unavailable. The archived file may have been removed.
         </div>
@@ -10189,7 +10235,11 @@ body:not(.theme-light) .licm-banner-chip { background: rgba(255,255,255,.08); }
     <div class="modal-footer">
       <span id="serial-photo-file" class="mono" style="font-size:11px; color:var(--text-sub);"></span>
       <span id="serial-photo-download-status" aria-live="polite" style="font-size:11px; font-weight:600;"></span>
-      <a id="serial-photo-open" href="#" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">Open in new tab</a>
+      <span class="serial-photo-zoom-controls">
+        <span id="serial-photo-zoom-label" class="serial-photo-zoom-label">100%</span>
+        <button type="button" id="serial-photo-zoom-reset" class="serial-photo-zoom-reset">Reset</button>
+      </span>
+      <a id="serial-photo-open" href="#" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">Preview</a>
     </div>
   </div>
 </div>
@@ -18630,6 +18680,149 @@ function openPhotoViewer(filename, timestamp, sizeStr) {
 let serialPhotoOpener = null;
 let serialPhotoDocument = null;
 let serialPhotoFile = '';
+let serialPhotoScale = 1;
+let serialPhotoPanX = 0;
+let serialPhotoPanY = 0;
+let serialPhotoPointerId = null;
+let serialPhotoDragX = 0;
+let serialPhotoDragY = 0;
+let serialPhotoWillChangeTimer = 0;
+
+function setSerialPhotoInteractionActive(active) {
+  const img = document.getElementById('serial-photo-img');
+  if (serialPhotoWillChangeTimer) {
+    clearTimeout(serialPhotoWillChangeTimer);
+    serialPhotoWillChangeTimer = 0;
+  }
+  if (!img) return;
+  if (active) {
+    img.classList.add('serial-photo-img-interacting');
+    return;
+  }
+  if (serialPhotoPointerId !== null) return;
+  img.classList.remove('serial-photo-img-interacting');
+}
+
+function scheduleSerialPhotoInteractionEnd() {
+  if (serialPhotoWillChangeTimer) clearTimeout(serialPhotoWillChangeTimer);
+  serialPhotoWillChangeTimer = setTimeout(() => {
+    serialPhotoWillChangeTimer = 0;
+    setSerialPhotoInteractionActive(false);
+  }, 150);
+}
+
+function serialPhotoStageMetrics() {
+  const stage = document.getElementById('serial-photo-stage');
+  const img = document.getElementById('serial-photo-img');
+  if (!stage || !img) return null;
+  const style = getComputedStyle(stage);
+  const padX = parseFloat(style.paddingLeft) || 0;
+  const padY = parseFloat(style.paddingTop) || 0;
+  const viewW = Math.max(1, stage.clientWidth - padX * 2);
+  const viewH = Math.max(1, stage.clientHeight - padY * 2);
+  const baseW = img.offsetWidth;
+  const baseH = img.offsetHeight;
+  return { stage, img, viewW, viewH, baseW, baseH,
+    baseCenterX: (viewW - baseW) / 2,
+    baseCenterY: (viewH - baseH) / 2 };
+}
+
+function serialPhotoCenteredOffset(metrics, scale = serialPhotoScale) {
+  return {
+    x: (metrics.viewW - metrics.baseW * scale) / 2 - metrics.baseCenterX,
+    y: (metrics.viewH - metrics.baseH * scale) / 2 - metrics.baseCenterY
+  };
+}
+
+function clampSerialPhotoPan() {
+  const metrics = serialPhotoStageMetrics();
+  if (!metrics || !metrics.baseW || !metrics.baseH) {
+    serialPhotoPanX = 0;
+    serialPhotoPanY = 0;
+    return;
+  }
+  const scaledW = metrics.baseW * serialPhotoScale;
+  const scaledH = metrics.baseH * serialPhotoScale;
+  if (scaledW <= metrics.viewW) {
+    serialPhotoPanX = 0;
+  } else {
+    const centeredX = (metrics.viewW - scaledW) / 2;
+    const marginX = Math.min(40, Math.max(12, metrics.viewW * .08));
+    const minX = marginX - centeredX - scaledW;
+    const maxX = metrics.viewW - marginX - centeredX;
+    serialPhotoPanX = Math.min(maxX, Math.max(minX, serialPhotoPanX));
+  }
+  if (scaledH <= metrics.viewH) {
+    serialPhotoPanY = 0;
+  } else {
+    const centeredY = (metrics.viewH - scaledH) / 2;
+    const marginY = Math.min(40, Math.max(12, metrics.viewH * .08));
+    const minY = marginY - centeredY - scaledH;
+    const maxY = metrics.viewH - marginY - centeredY;
+    serialPhotoPanY = Math.min(maxY, Math.max(minY, serialPhotoPanY));
+  }
+}
+
+let serialPhotoZoomFrame = 0;
+function renderSerialPhotoZoom() {
+  const stage = document.getElementById('serial-photo-stage');
+  const img = document.getElementById('serial-photo-img');
+  const label = document.getElementById('serial-photo-zoom-label');
+  if (!stage || !img) return;
+  clampSerialPhotoPan();
+  const metrics = serialPhotoStageMetrics();
+  if (!metrics) return;
+  const centered = serialPhotoCenteredOffset(metrics);
+  img.style.transformOrigin = '0 0';
+  img.style.transform = `translate(${centered.x + serialPhotoPanX}px, ${centered.y + serialPhotoPanY}px) scale(${serialPhotoScale})`;
+  img.classList.toggle('serial-photo-img-zoomable', serialPhotoScale > 1);
+  stage.classList.toggle('serial-photo-stage-zoomable', serialPhotoScale > 1);
+  if (label) label.textContent = `${Math.round(serialPhotoScale * 100)}%`;
+}
+
+function scheduleSerialPhotoZoomRender() {
+  if (serialPhotoZoomFrame) return;
+  serialPhotoZoomFrame = requestAnimationFrame(() => {
+    serialPhotoZoomFrame = 0;
+    renderSerialPhotoZoom();
+  });
+}
+
+function resetSerialPhotoZoom() {
+  serialPhotoScale = 1;
+  serialPhotoPanX = 0;
+  serialPhotoPanY = 0;
+  serialPhotoPointerId = null;
+  setSerialPhotoInteractionActive(false);
+  const img = document.getElementById('serial-photo-img');
+  if (img) img.classList.remove('serial-photo-img-dragging');
+  scheduleSerialPhotoZoomRender();
+}
+
+function zoomSerialPhotoAt(clientX, clientY, nextScale) {
+  const metrics = serialPhotoStageMetrics();
+  if (!metrics || !metrics.baseW || !metrics.baseH) return;
+  const rect = metrics.stage.getBoundingClientRect();
+  const style = getComputedStyle(metrics.stage);
+  const padX = parseFloat(style.paddingLeft) || 0;
+  const padY = parseFloat(style.paddingTop) || 0;
+  const localX = clientX - rect.left - padX;
+  const localY = clientY - rect.top - padY;
+  const oldScale = serialPhotoScale;
+  const newScale = Math.min(6, Math.max(1, nextScale));
+  if (newScale === oldScale) return;
+  const oldCentered = serialPhotoCenteredOffset(metrics, oldScale);
+  const oldLeft = metrics.baseCenterX + oldCentered.x + serialPhotoPanX;
+  const oldTop = metrics.baseCenterY + oldCentered.y + serialPhotoPanY;
+  const imageX = (localX - oldLeft) / oldScale;
+  const imageY = (localY - oldTop) / oldScale;
+  const newCentered = serialPhotoCenteredOffset(metrics, newScale);
+  serialPhotoScale = newScale;
+  serialPhotoPanX = localX - imageX * newScale - metrics.baseCenterX - newCentered.x;
+  serialPhotoPanY = localY - imageY * newScale - metrics.baseCenterY - newCentered.y;
+  clampSerialPhotoPan();
+  scheduleSerialPhotoZoomRender();
+}
 
 function setSerialPhotoFile(file) {
   const img = document.getElementById('serial-photo-img');
@@ -18644,6 +18837,7 @@ function setSerialPhotoFile(file) {
     status.className = '';
     status.style.color = '';
   }
+  resetSerialPhotoZoom();
   if (img) {
     img.onerror = () => {
       img.style.display = 'none';
@@ -18652,10 +18846,12 @@ function setSerialPhotoFile(file) {
     img.onload = () => {
       img.style.display = 'block';
       if (error) error.style.display = 'none';
+      renderSerialPhotoZoom();
     };
     img.alt = 'Archived DO/SO photo';
     img.src = url;
     img.style.display = url ? 'block' : 'none';
+    scheduleSerialPhotoZoomRender();
   }
   if (error) error.style.display = url ? 'none' : 'block';
   if (fileLabel) fileLabel.textContent = file || 'Photo unavailable';
@@ -18733,10 +18929,12 @@ function openSerialPhotoViewer(serial, model, documentJson, opener = null) {
     serialPhotoDocument = {};
   }
   const doc = serialPhotoDocument;
+  resetSerialPhotoZoom();
   const title = document.getElementById('serial-photo-title');
   const sub = document.getElementById('serial-photo-subtitle');
   const status = document.getElementById('serial-photo-download-status');
-  if (title) title.textContent = `Photo for ${serial}`;
+  const titleParts = [String(model || '').trim(), String(serial || '').trim()].filter(Boolean);
+  if (title) title.textContent = `Photo for : ${titleParts.join(' : ')}`;
   if (sub) sub.textContent = `DO ${doc.doNo || '—'} · SO ${doc.soNo || '—'}`;
   if (status) {
     status.textContent = '';
@@ -18750,6 +18948,7 @@ function openSerialPhotoViewer(serial, model, documentJson, opener = null) {
 function closeSerialPhotoViewer() {
   const modal = document.getElementById('serial-photo-viewer-modal');
   if (modal) modal.classList.remove('open');
+  resetSerialPhotoZoom();
   if (serialPhotoOpener && typeof serialPhotoOpener.focus === 'function') {
     serialPhotoOpener.focus();
   }
@@ -18759,7 +18958,53 @@ function closeSerialPhotoViewer() {
 }
 
 document.getElementById('serial-photo-download')?.addEventListener('click', downloadSerialPhoto);
+document.getElementById('serial-photo-zoom-reset')?.addEventListener('click', resetSerialPhotoZoom);
 document.getElementById('serial-photo-close')?.addEventListener('click', closeSerialPhotoViewer);
+const serialPhotoStage = document.getElementById('serial-photo-stage');
+const serialPhotoImg = document.getElementById('serial-photo-img');
+serialPhotoStage?.addEventListener('wheel', event => {
+  if (!event.ctrlKey) return;
+  event.preventDefault();
+  setSerialPhotoInteractionActive(true);
+  scheduleSerialPhotoInteractionEnd();
+  zoomSerialPhotoAt(event.clientX, event.clientY,
+    serialPhotoScale * Math.exp(-event.deltaY * 0.0015));
+}, { passive: false });
+serialPhotoImg?.addEventListener('pointerdown', event => {
+  if (serialPhotoScale <= 1 || event.button !== 0) return;
+  event.preventDefault();
+  setSerialPhotoInteractionActive(true);
+  serialPhotoPointerId = event.pointerId;
+  serialPhotoDragX = event.clientX;
+  serialPhotoDragY = event.clientY;
+  serialPhotoImg.classList.add('serial-photo-img-dragging');
+  serialPhotoImg.setPointerCapture(event.pointerId);
+});
+serialPhotoImg?.addEventListener('dragstart', event => event.preventDefault());
+serialPhotoImg?.addEventListener('pointermove', event => {
+  if (event.pointerId !== serialPhotoPointerId) return;
+  serialPhotoPanX += event.clientX - serialPhotoDragX;
+  serialPhotoPanY += event.clientY - serialPhotoDragY;
+  serialPhotoDragX = event.clientX;
+  serialPhotoDragY = event.clientY;
+  clampSerialPhotoPan();
+  scheduleSerialPhotoZoomRender();
+});
+const stopSerialPhotoDrag = event => {
+  if (event.pointerId !== serialPhotoPointerId) return;
+  serialPhotoPointerId = null;
+  serialPhotoImg.classList.remove('serial-photo-img-dragging');
+  setSerialPhotoInteractionActive(false);
+  if (serialPhotoImg.hasPointerCapture(event.pointerId)) {
+    serialPhotoImg.releasePointerCapture(event.pointerId);
+  }
+};
+serialPhotoImg?.addEventListener('pointerup', stopSerialPhotoDrag);
+serialPhotoImg?.addEventListener('pointercancel', stopSerialPhotoDrag);
+serialPhotoImg?.addEventListener('dblclick', resetSerialPhotoZoom);
+window.addEventListener('resize', () => {
+  if (serialPhotoScale > 1) scheduleSerialPhotoZoomRender();
+});
 document.getElementById('serial-photo-viewer-modal')?.addEventListener('mousedown', e => {
   if (e.target === e.currentTarget) closeSerialPhotoViewer();
 });
