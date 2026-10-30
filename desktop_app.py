@@ -1523,7 +1523,9 @@ class DesktopApi:
                     final_point = wintypes.POINT()
                     work = self._get_work_area(hwnd)
                     if (_u32.GetCursorPos(ctypes.byref(final_point))
-                            and work and final_point.y <= work[1] + 6):
+                            and work and final_point.y <= work[1] + 6
+                            and (abs(int(final_point.x) - int(point.x))
+                                 + abs(int(final_point.y) - int(point.y)) >= 8)):
                         self.maximize()
                     rect = wintypes.RECT()
                     if _u32.GetWindowRect(hwnd, ctypes.byref(rect)) and self._window:

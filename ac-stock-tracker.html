@@ -19972,8 +19972,8 @@ function handleHeaderDblClick(event) {
       const fillsWorkArea = !maximized
         && Number.isFinite(screen.availWidth)
         && Number.isFinite(screen.availHeight)
-        && b.width >= screen.availWidth - 2
-        && b.height >= screen.availHeight - 2;
+        && b.width >= screen.availWidth * window.devicePixelRatio - 2
+        && b.height >= screen.availHeight * window.devicePixelRatio - 2;
       if (fillsWorkArea) {
         try { header.releasePointerCapture(e.pointerId); } catch (err) {}
         return;

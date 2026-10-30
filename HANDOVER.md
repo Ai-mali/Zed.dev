@@ -300,6 +300,7 @@ Copy the prompt below into the next Copilot chat after opening this repository:
 - Added `DesktopApi.start_native_drag()` using cached HWND, restore anchoring, `WM_NCLBUTTONDOWN/HTCAPTION`, and a daemon poller that preserves top-edge maximize behavior. `VRE_NATIVE_DRAG=0` disables the native path.
 - Header pointerdown now releases capture and tries native drag first; the existing JS drag remains the fallback when the bridge is unavailable or returns false. Interactive controls, snap preview, restore behavior, and double-click maximize remain owned by the frontend.
 - Added a full-work-area guard and retained move-only `DesktopApi.move_window()` for the JS fallback. Validation passed: `node check_frontend_syntax.js`, all 73 Node tests, Python compilation for all eight application modules, `git diff --check`, and stubbed no-HWND/disabled-native tests. Native drag and 1280x680 tab console checks could not be tested headless and need a real-PC check; no executable rebuild was performed. Changes are uncommitted on `ui-window-drag-native`; runtime `serial_provenance.json` remains untracked.
+- Fixed DPI-aware work-area comparison and prevented top-edge maximize on a plain native click unless the cursor moved at least 8 px.
 
 ## 14. Handover maintenance rule
 
